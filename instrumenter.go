@@ -75,6 +75,13 @@ type instrumenter struct {
 	// The conditions from the original code that were instrumented,
 	// from all files from fset.
 	conds []cond
+
+	// In module mode, the importer shared by all packages,
+	// the import path of the registry package,
+	// and the name of the package in its stats files.
+	importer  types.Importer
+	regPath   string
+	statsName string
 }
 
 // instrument modifies the code of the Go package from srcDir
@@ -111,7 +118,10 @@ func (i *instrumenter) instrument(srcDir, singleFile, dstDir string) bool {
 }
 
 func (i *instrumenter) resolveTypes(pkgsMap map[string]*ast.Package) {
-	imp := importer.ForCompiler(i.fset, "source", nil)
+	imp := i.importer
+	if imp == nil {
+		imp = importer.ForCompiler(i.fset, "source", nil)
+	}
 	conf := types.Config{Importer: imp}
 	info := types.Info{
 		Types: make(map[ast.Expr]types.TypeAndValue),
@@ -626,6 +636,12 @@ func (i *instrumenter) instrumentTestMain(astFile *ast.File) {
 //go:embed templates/gobco_fixed.go
 var fixedTemplate string
 
+//go:embed templates/gobco_single.go
+var singleTemplate string
+
+//go:embed templates/gobco_module.go
+var moduleTemplate string
+
 //go:embed templates/gobco_no_testmain_test.go
 var noTestMainTemplate string
 
@@ -633,9 +649,16 @@ func (i *instrumenter) writeGobcoFiles(tmpDir string, pkgs []*ast.Package) {
 	pkgname := pkgs[0].Name
 	fixPkgname := func(str string) string {
 		str = strings.TrimPrefix(str, "//go:build ignore\n// +build ignore\n\n")
+		str = strings.Replace(str, "\"GOBCOREG\"", strconv.Quote(i.regPath), 1)
+		str = strings.Replace(str, "\"GOBCOSTATS\"", strconv.Quote(i.statsName), 1)
 		return strings.Replace(str, "package main\n", "package "+pkgname+"\n", 1)
 	}
 	writeFile(filepath.Join(tmpDir, "gobco_fixed.go"), fixPkgname(fixedTemplate))
+	if i.regPath == "" {
+		writeFile(filepath.Join(tmpDir, "gobco_single.go"), fixPkgname(singleTemplate))
+	} else {
+		writeFile(filepath.Join(tmpDir, "gobco_module.go"), fixPkgname(moduleTemplate))
+	}
 	i.writeGobcoGo(filepath.Join(tmpDir, "gobco_variable.go"), pkgname)
 
 	if !i.hasTestMain {

@@ -14,6 +14,6 @@ import (
 func TestMain(m *testing.M) {
 	gobcoCounts.load(gobcoCounts.filename())
 	exitCode := m.Run()
-	gobcoCounts.persist()
+	gobcoCounts.finish(0)
 	os.Exit(exitCode)
 }

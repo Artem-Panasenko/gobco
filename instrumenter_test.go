@@ -97,6 +97,9 @@ func Test_instrumenter(t *testing.T) {
 			map[ast.Stmt]ast.Stmt{},
 			false,
 			nil,
+			nil,
+			"",
+			"",
 		}
 		fileName := filepath.Clean(base + ".go")
 		f := pkgs["instrumenter"].Files[fileName]

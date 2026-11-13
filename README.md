@@ -1,9 +1,9 @@
-[![Build Status](https://app.travis-ci.com/rillig/gobco.svg?branch=master)](https://app.travis-ci.com/github/rillig/gobco)
-[![codecov](https://codecov.io/gh/rillig/gobco/branch/master/graph/badge.svg)](https://codecov.io/gh/rillig/gobco)
-
 # GOBCO - Golang Branch Coverage
 
 Gobco measures condition coverage of Go code.
+
+This is a fork of [rillig/gobco](https://github.com/rillig/gobco)
+that adds a mode covering a whole module in a single test run.
 
 Gobco is intended to be used in addition to `go test -cover`.
 For example, gobco does not detect functions or methods that are completely
@@ -12,19 +12,12 @@ Gobco also doesn't cover `select` statements.
 
 ## Installation
 
-With go1.17 or later:
-
 ```text
-$ go install github.com/rillig/gobco@latest
+$ go install github.com/artem-panasenko/gobco@latest
 ```
 
-With go1.16:
-
-```text
-$ go get github.com/rillig/gobco
-```
-
-Older go releases are not supported.
+Build gobco with the Go toolchain of the environment that runs the tests,
+since gobco calls `go list` and `go test` from there.
 
 ## Usage
 
@@ -40,7 +33,7 @@ The output typically looks like the following example, taken from package
 ```text
 ok  	github.com/rillig/pkglint/v23	29.648s
 
-Condition coverage: 8720/8840
+Condition coverage: 8720/8840 (98.6%)
 ...
 changes.go:171:61: condition "n == 6" was 12 times true but never false
 distinfo.go:268:8: condition "alg == \"SHA1\"" was 16 times false but never true
@@ -52,6 +45,34 @@ vartypecheck.go:1027:11: condition "len(invalid) > 1" was once false but never t
 vartypecheck.go:1628:42: condition "cv.MkLines.pkg != nil" was 8 times true but never false
 vartypecheck.go:1630:6: condition "distname.IsConstant()" was 8 times true but never false
 ```
+
+## Module mode
+
+To cover several packages of a module with a single `go test` run,
+run gobco in the module root:
+
+~~~text
+$ gobco -module [-branch] [-exclude pattern]... [-threshold pct] [-test opt]... [packages]
+~~~
+
+The packages are those that get instrumented, by default `./...`.
+The tests of the whole module run once, so a condition counts as covered
+no matter which package's test reaches it, including integration tests.
+The module is not copied and the working tree is not modified.
+
+A test directory that has its own `TestMain` must be among the packages,
+so that it saves the counters when it exits.
+
+`-exclude` leaves packages out of the report and the totals,
+`-threshold` makes gobco exit with status 1 below the given percentage.
+
+For example:
+
+~~~text
+$ gobco -module -branch -exclude ./internal/generated/... ./internal/... ./test/integration
+...
+Branch coverage: 3/4 (75.0%)
+~~~
 
 ## Adding custom test conditions
 

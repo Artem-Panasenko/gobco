@@ -1,3 +1,3 @@
 package main
 
-const version = "1.3.5-snapshot"
+const version = "1.4.0"

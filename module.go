@@ -54,6 +54,8 @@ func Flush() {
 
 // modulePkg is a package of the module that is instrumented.
 type modulePkg struct {
+	importPath string
+
 	// Relative to the module root, using '/' as separator.
 	dir string
 
@@ -141,7 +143,7 @@ func (g *gobco) findModule() (root, path string) {
 // A pattern that starts with a directory, such as "internal/...", means
 // that directory, not an import path from the standard library.
 func (g *gobco) listPackages(modRoot string, patterns []string) []modulePkg {
-	args := []string{"-find", "-e", "-f", "{{.Dir}}"}
+	args := []string{"-find", "-e", "-f", "{{.ImportPath}}\t{{.Dir}}"}
 	for _, pattern := range patterns {
 		first := strings.SplitN(filepath.ToSlash(pattern), "/", 2)[0]
 		st, err := os.Stat(first)
@@ -152,16 +154,18 @@ func (g *gobco) listPackages(modRoot string, patterns []string) []modulePkg {
 	}
 
 	var pkgs []modulePkg
-	for _, dir := range strings.Split(g.goList(args...), "\n") {
-		if dir == "" {
+	for _, line := range strings.Split(g.goList(args...), "\n") {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) != 2 || fields[1] == "" {
 			continue // a package that "go list -e" could not locate
 		}
+		importPath, dir := fields[0], fields[1]
 		rel, err := filepath.Rel(modRoot, dir)
 		g.check(err)
 		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			g.check(fmt.Errorf("gobco: package %s is outside the module", dir))
 		}
-		pkgs = append(pkgs, modulePkg{dir: filepath.ToSlash(rel)})
+		pkgs = append(pkgs, modulePkg{importPath: importPath, dir: filepath.ToSlash(rel)})
 	}
 	return pkgs
 }
@@ -217,6 +221,7 @@ func (g *gobco) instrumentModule(modRoot, regPath, tree string, pkgs []modulePkg
 		in.importer = imp
 		in.regPath = regPath
 		in.statsName = strconv.Itoa(idx)
+		in.importPath = pkg.importPath
 		if !in.instrument(filepath.FromSlash(pkg.dir), "", dst) {
 			continue
 		}

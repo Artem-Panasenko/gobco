@@ -294,6 +294,25 @@ func Test_gobcoMain__module_coverprofile_needs_module(t *testing.T) {
 	s.CheckEquals(s.Stderr(), "gobco: -coverpkg needs -coverprofile\n")
 }
 
+// A black box test may import its package under another name.
+func Test_gobcoMain__module_black_box_alias(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+	dir := writeModule(t, map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.16\n",
+		"p/p.go": "package p\n\n" +
+			"func Abs(x int) int {\n\tif x < 0 {\n\t\treturn -x\n\t}\n\treturn x\n}\n",
+		"p/p_test.go": "package p_test\n\nimport (\n\t\"testing\"\n\n\tother \"example.com/m/p\"\n)\n\n" +
+			"func TestAbs(t *testing.T) {\n\tif other.Abs(1) != 1 {\n\t\tt.Error(\"fail\")\n\t}\n}\n",
+	})
+
+	exitCode := s.runIn(dir, "gobco", "-module")
+
+	s.CheckEquals(exitCode, 0)
+	s.CheckContains(s.Stdout(), "Condition coverage: 1/2 (50.0%)")
+	s.CheckEquals(s.Stderr(), "")
+}
+
 func Test_testOutput(t *testing.T) {
 	s := NewSuite(t)
 	defer s.TearDownTest()

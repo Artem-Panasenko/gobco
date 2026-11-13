@@ -348,6 +348,7 @@ func (g *gobco) newInstrumenter() instrumenter {
 		nil,
 		"",
 		"",
+		"",
 	}
 }
 

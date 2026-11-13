@@ -82,6 +82,9 @@ type instrumenter struct {
 	importer  types.Importer
 	regPath   string
 	statsName string
+
+	// In module mode, the import path of the package.
+	importPath string
 }
 
 // instrument modifies the code of the Go package from srcDir
@@ -763,6 +766,12 @@ func (i *instrumenter) writeGobcoBlackBox(pkgs []*ast.Package, dstDir string) {
 				}
 			}
 		})
+	}
+
+	// The black box tests may import the package under another name,
+	// or not at all.
+	if i.importPath != "" {
+		pkgName, pkgPath = "gobcoMain", i.importPath
 	}
 
 	text := "" +

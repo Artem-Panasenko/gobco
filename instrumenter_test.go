@@ -100,6 +100,7 @@ func Test_instrumenter(t *testing.T) {
 			nil,
 			"",
 			"",
+			"",
 		}
 		fileName := filepath.Clean(base + ".go")
 		f := pkgs["instrumenter"].Files[fileName]

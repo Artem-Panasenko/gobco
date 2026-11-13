@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -23,6 +24,11 @@ func main() {
 func gobcoMain(stdout, stderr io.Writer, args ...string) int {
 	g := newGobco(stdout, stderr)
 	g.parseCommandLine(args)
+	if g.module {
+		g.runModule()
+		g.cleanUp()
+		return g.exitCode
+	}
 	g.prepareTmp()
 	if g.instrument() {
 		g.runGoTest()
@@ -35,13 +41,29 @@ func gobcoMain(stdout, stderr io.Writer, args ...string) int {
 }
 
 type gobco struct {
-	branch      bool
-	listAll     bool
-	immediately bool
-	keep        bool
-	coverTest   bool
+	branch       bool
+	listAll      bool
+	immediately  bool
+	keep         bool
+	coverTest    bool
+	module       bool
+	threshold    float64
+	coverProfile string
+	coverPkg     string
+
+	// The statement coverage, if the tests ran with a cover profile.
+	statements *tally
+
+	// The copy of the module in which the tests ran with a cover profile.
+	treeDir string
+
+	// The root directory and the registry package of the module.
+	modRoot string
+	regPath string
 
 	goTestArgs []string
+	exclude    []string
+	patterns   []string
 	args       []argInfo
 
 	statsFilename string
@@ -57,6 +79,16 @@ func newGobco(stdout io.Writer, stderr io.Writer) *gobco {
 	g.logger.init(stdout, stderr)
 	g.buildEnv.init(&g.logger)
 	return &g
+}
+
+// check stops gobco if there is an error,
+// after removing the temporary files.
+func (g *gobco) check(err error) {
+	if err != nil {
+		g.errf("%s", err)
+		g.cleanUp()
+		exit(1)
+	}
 }
 
 func (g *gobco) parseCommandLine(argv []string) {
@@ -86,6 +118,16 @@ func (g *gobco) parseOptions(argv []string) []string {
 		"show progress messages")
 	flags.BoolVar(&g.coverTest, "cover-test", false,
 		"cover the test code as well")
+	flags.BoolVar(&g.module, "module", false,
+		"cover all given packages of the module with a single \"go test\" run")
+	flags.Var(newSliceFlag(&g.exclude), "exclude",
+		"in module mode, leave the packages matching the `pattern` out of the report")
+	flags.StringVar(&g.coverProfile, "coverprofile", "",
+		"in module mode, also write the statement coverage profile to this `file`")
+	flags.StringVar(&g.coverPkg, "coverpkg", "",
+		"with -coverprofile, the `list` of packages for the statement coverage, as for \"go test\"")
+	flags.Float64Var(&g.threshold, "threshold", 0,
+		"exit with status 1 if the coverage is below this `percentage`")
 	flags.BoolVar(&ver, "version", false,
 		"print the gobco version")
 
@@ -118,6 +160,26 @@ func (g *gobco) parseOptions(argv []string) []string {
 }
 
 func (g *gobco) parseArgs(args []string) {
+	if g.coverProfile != "" && !g.module {
+		g.check(errors.New("gobco: -coverprofile needs -module"))
+	}
+	if g.coverPkg != "" && g.coverProfile == "" {
+		g.check(errors.New("gobco: -coverpkg needs -coverprofile"))
+	}
+	if g.coverProfile != "" {
+		abs, err := filepath.Abs(g.coverProfile)
+		g.check(err)
+		g.coverProfile = abs
+	}
+
+	if g.module {
+		g.patterns = args
+		if len(args) == 0 {
+			g.patterns = []string{"./..."}
+		}
+		return
+	}
+
 	if len(args) == 0 {
 		args = []string{"."}
 	}
@@ -250,7 +312,23 @@ func (g *gobco) prepareTmp() {
 }
 
 func (g *gobco) instrument() bool {
-	in := instrumenter{
+	in := g.newInstrumenter()
+
+	found := false
+	for _, arg := range g.args {
+		instrDst := g.file(arg.instrDir)
+		if in.instrument(arg.argDir, arg.instrFile, instrDst) {
+			found = true
+			g.verbosef("Instrumented %s to %s", arg.arg, instrDst)
+		}
+	}
+	return found
+}
+
+// newInstrumenter returns an instrumenter for a single package,
+// as it collects the conditions of that package.
+func (g *gobco) newInstrumenter() instrumenter {
+	return instrumenter{
 		g.branch,
 		g.coverTest,
 		g.immediately,
@@ -267,17 +345,11 @@ func (g *gobco) instrument() bool {
 		map[ast.Stmt]ast.Stmt{},
 		false,
 		nil,
+		nil,
+		"",
+		"",
+		"",
 	}
-
-	found := false
-	for _, arg := range g.args {
-		instrDst := g.file(arg.instrDir)
-		if in.instrument(arg.argDir, arg.instrFile, instrDst) {
-			found = true
-			g.verbosef("Instrumented %s to %s", arg.arg, instrDst)
-		}
-	}
-	return found
 }
 
 func (g *gobco) runGoTest() {
@@ -306,13 +378,60 @@ func (g *gobco) printOutput() {
 		g.logger.errf("%s", err)
 	}
 
-	cnt := 0
-	for _, c := range conds {
-		if c.TrueCount > 0 {
-			cnt++
-		}
-		if c.FalseCount > 0 {
-			cnt++
+	g.report([]pkgReport{{"", conds}})
+}
+
+// pkgReport is the coverage data of a single package.
+type pkgReport struct {
+	dir   string
+	conds []condition
+}
+
+// tally counts how many of the outcomes of some conditions are covered.
+type tally struct{ covered, total int }
+
+func (t *tally) add(c condition) {
+	t.total += 2
+	if c.TrueCount > 0 {
+		t.covered++
+	}
+	if c.FalseCount > 0 {
+		t.covered++
+	}
+}
+
+func (t tally) percent() float64 {
+	if t.total == 0 {
+		return 100
+	}
+	return float64(t.covered) / float64(t.total) * 100
+}
+
+func (t tally) String() string {
+	return fmt.Sprintf("%d/%d (%.1f%%)", t.covered, t.total, t.percent())
+}
+
+// report prints the coverage of the given packages
+// and checks it against the threshold.
+func (g *gobco) report(pkgs []pkgReport) {
+	var total tally
+	byPkg := make([]tally, len(pkgs))
+	byFile := map[string]*tally{}
+	var files []string
+
+	for i, pkg := range pkgs {
+		for _, c := range pkg.conds {
+			file := c.Start
+			for n := 0; n < 2; n++ {
+				file = file[:strings.LastIndex(file, ":")]
+			}
+			if byFile[file] == nil {
+				byFile[file] = &tally{}
+				files = append(files, file)
+			}
+			total.add(c)
+			byPkg[i].add(c)
+			byFile[file].add(c)
 		}
 	}
 
@@ -321,10 +440,34 @@ func (g *gobco) printOutput() {
 		kind = "Branch coverage"
 	}
 	g.outf("")
-	g.outf("%s: %d/%d", kind, cnt, len(conds)*2)
+	g.outf("%s: %s", kind, total)
+	if g.statements != nil {
+		g.outf("Statement coverage: %s", *g.statements)
+	}
 
-	for _, cond := range conds {
-		g.printCond(cond)
+	for _, pkg := range pkgs {
+		for _, cond := range pkg.conds {
+			g.printCond(cond)
+		}
+	}
+
+	if len(pkgs) > 1 {
+		g.outf("Per-package coverage:")
+		for i, pkg := range pkgs {
+			g.outf("  %s: %s", pkg.dir, byPkg[i])
+		}
+	}
+	if len(files) > 0 {
+		g.outf("Per-file coverage:")
+		for _, file := range files {
+			g.outf("  %s: %s", file, *byFile[file])
+		}
+	}
+
+	if float64(total.covered)*100 < g.threshold*float64(total.total) {
+		g.errf("gobco: coverage %.1f%% is below the threshold %.1f%%",
+			total.percent(), g.threshold)
+		g.exitCode = 1
 	}
 }
 
@@ -332,10 +475,17 @@ func (g *gobco) cleanUp() {
 	if g.keep {
 		g.errf("")
 		g.errf("gobco: the temporary files are in %s", g.tmpdir)
+		if g.treeDir != "" {
+			g.errf("gobco: the instrumented module is in %s", g.treeDir)
+		}
 	} else {
-		err := os.RemoveAll(g.tmpdir)
-		if err != nil {
-			g.verbosef("%s", err)
+		for _, dir := range []string{g.tmpdir, g.treeDir} {
+			if dir == "" {
+				continue
+			}
+			if err := os.RemoveAll(dir); err != nil {
+				g.verbosef("%s", err)
+			}
 		}
 	}
 }
@@ -411,7 +561,7 @@ func (t goTest) run(
 	statsFilename string,
 	e *buildEnv,
 ) int {
-	args := t.args(verbose, extraArgs)
+	args := t.args(verbose, ".", extraArgs)
 	goTest := exec.Command("go", args[1:]...)
 	goTest.Stdout = e.stdout
 	goTest.Stderr = e.stderr
@@ -431,7 +581,7 @@ func (t goTest) run(
 	}
 }
 
-func (goTest) args(verbose bool, extraArgs []string) []string {
+func (goTest) args(verbose bool, pkgs string, extraArgs []string) []string {
 	args := []string{"go", "test"}
 
 	if verbose {
@@ -447,7 +597,7 @@ func (goTest) args(verbose bool, extraArgs []string) []string {
 	// Without this option, 'go test' sometimes needs twice the time.
 	args = append(args, "-test.count", "1")
 
-	args = append(args, ".")
+	args = append(args, pkgs)
 
 	// 'go test' allows flags even after packages.
 	args = append(args, extraArgs...)
@@ -580,6 +730,6 @@ type argInfo struct {
 type condition struct {
 	Start      string
 	Code       string
-	TrueCount  int
-	FalseCount int
+	TrueCount  int64
+	FalseCount int64
 }

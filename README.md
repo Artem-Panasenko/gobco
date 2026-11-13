@@ -1,9 +1,9 @@
-[![Build Status](https://app.travis-ci.com/rillig/gobco.svg?branch=master)](https://app.travis-ci.com/github/rillig/gobco)
-[![codecov](https://codecov.io/gh/rillig/gobco/branch/master/graph/badge.svg)](https://codecov.io/gh/rillig/gobco)
-
 # GOBCO - Golang Branch Coverage
 
 Gobco measures condition coverage of Go code.
+
+This is a fork of [rillig/gobco](https://github.com/rillig/gobco)
+that adds a mode covering a whole module in a single test run.
 
 Gobco is intended to be used in addition to `go test -cover`.
 For example, gobco does not detect functions or methods that are completely
@@ -12,19 +12,13 @@ Gobco also doesn't cover `select` statements.
 
 ## Installation
 
-With go1.17 or later:
-
 ```text
-$ go install github.com/rillig/gobco@latest
+$ go install github.com/artem-panasenko/gobco@latest
 ```
 
-With go1.16:
-
-```text
-$ go get github.com/rillig/gobco
-```
-
-Older go releases are not supported.
+Gobco needs go1.27 or later.
+Build gobco with the Go toolchain of the environment that runs the tests,
+since gobco calls `go list` and `go test` from there.
 
 ## Usage
 
@@ -40,7 +34,7 @@ The output typically looks like the following example, taken from package
 ```text
 ok  	github.com/rillig/pkglint/v23	29.648s
 
-Condition coverage: 8720/8840
+Condition coverage: 8720/8840 (98.6%)
 ...
 changes.go:171:61: condition "n == 6" was 12 times true but never false
 distinfo.go:268:8: condition "alg == \"SHA1\"" was 16 times false but never true
@@ -52,6 +46,73 @@ vartypecheck.go:1027:11: condition "len(invalid) > 1" was once false but never t
 vartypecheck.go:1628:42: condition "cv.MkLines.pkg != nil" was 8 times true but never false
 vartypecheck.go:1630:6: condition "distname.IsConstant()" was 8 times true but never false
 ```
+
+## Module mode
+
+To cover several packages of a module with a single `go test` run,
+run gobco in the module root:
+
+~~~text
+$ gobco -module [-branch] [-exclude pattern]... [-threshold pct] [-test opt]... [packages]
+~~~
+
+The packages are those that get instrumented, by default `./...`.
+The tests of the whole module run once, so a condition counts as covered
+no matter which package's test reaches it, including integration tests.
+The module is not copied and the working tree is not modified.
+
+A test directory that has its own `TestMain` must be among the packages,
+so that it saves the counters when it exits.
+
+The output of `go test` is passed on as it is, so a failing test, a panic or
+a timeout reads the same as in a plain `go test` run, and gobco exits with
+status 1. In that case gobco does not report the coverage: a test binary that
+panics or times out does not save its counters, and the output of the failed
+test stays the last thing in the log. A package that does not compile stops
+gobco with the message from the compiler, before any test runs.
+
+`-exclude` leaves packages out of the report and the totals,
+`-threshold` makes gobco exit with status 1 below the given percentage.
+
+For example:
+
+~~~text
+$ gobco -module -branch -exclude ./internal/generated/... ./internal/... ./test/integration
+...
+Branch coverage: 3/4 (75.0%)
+~~~
+
+### Statement coverage in the same run
+
+With `-coverprofile file`, the same test run also measures the statement
+coverage, as `go test -cover` does, and gobco writes the profile to `file`:
+
+~~~text
+$ gobco -module -branch -coverprofile=cover.out -coverpkg=./internal/... ./internal/... ./test/integration
+...
+Branch coverage: 3/4 (75.0%)
+Statement coverage: 6/7 (85.7%)
+~~~
+
+`-coverpkg` is passed on to `go test` and chooses the packages that the
+statement coverage counts. The profile has the usual format, so
+`go tool cover -func=cover.out` and `go tool cover -html=cover.out` work.
+Gobco itself does not write an HTML report.
+
+The Go cover tool reads the source files from the disk and ignores the
+overlay, so with `-coverprofile` gobco runs the tests in a copy of the module
+(without `.git`, and with `vendor` linked), in a temporary directory that
+depends only on the module. The first run compiles everything in that
+directory, later runs use the build cache. The copy is removed at the end.
+Paths in the output of the tests, such as in a stack trace, point to the
+original files. The tests themselves see the copy as their working directory.
+
+The profile leaves out the files that gobco injects, and gobco does not pass
+on the coverage that `go test` prints for each package, since that includes
+them. Gobco also rewrites some statements, such as `switch`, so the number of
+statements can be slightly higher than for a plain `go test`.
+Lines are the same as in the source, but columns in lines with a condition are
+shifted.
 
 ## Adding custom test conditions
 

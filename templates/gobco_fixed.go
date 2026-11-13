@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync/atomic"
 )
 
 type gobcoOptions struct {
@@ -25,16 +26,8 @@ type gobcoStats struct {
 type gobcoCond struct {
 	Start      string
 	Code       string
-	TrueCount  int
-	FalseCount int
-}
-
-func (st *gobcoStats) filename() string {
-	filename := os.Getenv("GOBCO_STATS")
-	if filename == "" {
-		panic("gobco: GOBCO_STATS environment variable must be set")
-	}
-	return filename
+	TrueCount  int64
+	FalseCount int64
 }
 
 func (st *gobcoStats) check(err error) {
@@ -103,9 +96,9 @@ func (st *gobcoStats) persist() {
 func (st *gobcoStats) cover(idx int, cond bool) bool {
 	counts := &st.conds[idx]
 	if cond {
-		counts.TrueCount++
+		atomic.AddInt64(&counts.TrueCount, 1)
 	} else {
-		counts.FalseCount++
+		atomic.AddInt64(&counts.FalseCount, 1)
 	}
 
 	if gobcoOpts.immediately {
@@ -113,11 +106,6 @@ func (st *gobcoStats) cover(idx int, cond bool) bool {
 	}
 
 	return cond
-}
-
-func (st *gobcoStats) finish(exitCode int) int {
-	st.persist()
-	return exitCode
 }
 
 // GobcoCover is a top-level function to keep the instrumented code as simple

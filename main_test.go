@@ -148,6 +148,33 @@ func Test_gobco_parseCommandLine(t *testing.T) {
 	}})
 }
 
+func Test_gobco_parseCommandLine__module(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	g := s.newGobco()
+	g.parseCommandLine([]string{"gobco", "-module"})
+	s.CheckEquals(g.patterns, []string{"./..."})
+
+	g = s.newGobco()
+	g.parseCommandLine([]string{"gobco", "-module", "-exclude", "a", "b", "c/..."})
+	s.CheckEquals(g.patterns, []string{"b", "c/..."})
+	s.CheckEquals(g.exclude, []string{"a"})
+}
+
+// When gobco stops because of an error, it removes its temporary files.
+func Test_gobco_check(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	g := s.newGobco()
+	s.CheckPanics(func() { g.check(os.ErrInvalid) }, exited(1))
+
+	_, err := os.Stat(g.tmpdir)
+	s.CheckEquals(os.IsNotExist(err), true)
+	s.CheckEquals(s.Stderr(), "invalid argument\n")
+}
+
 func Test_gobco_parseCommandLine__keep(t *testing.T) {
 	s := NewSuite(t)
 	defer s.TearDownTest()
@@ -201,6 +228,12 @@ func Test_gobco_parseCommandLine__usage(t *testing.T) {
 		"    \tcover branches, not conditions\n"+
 		"  -cover-test\n"+
 		"    \tcover the test code as well\n"+
+		"  -coverpkg list\n"+
+		"    \twith -coverprofile, the list of packages for the statement coverage, as for \"go test\"\n"+
+		"  -coverprofile file\n"+
+		"    \tin module mode, also write the statement coverage profile to this file\n"+
+		"  -exclude pattern\n"+
+		"    \tin module mode, leave the packages matching the pattern out of the report\n"+
 		"  -help\n"+
 		"    \tprint the available command line options\n"+
 		"  -immediately\n"+
@@ -209,10 +242,14 @@ func Test_gobco_parseCommandLine__usage(t *testing.T) {
 		"    \tdon't remove the temporary working directory\n"+
 		"  -list-all\n"+
 		"    \tat finish, print also those conditions that are fully covered\n"+
+		"  -module\n"+
+		"    \tcover all given packages of the module with a single \"go test\" run\n"+
 		"  -stats file\n"+
 		"    \tload and persist the JSON coverage data to this file\n"+
 		"  -test option\n"+
 		"    \tpass the option to \"go test\", such as -vet=off\n"+
+		"  -threshold percentage\n"+
+		"    \texit with status 1 if the coverage is below this percentage\n"+
 		"  -verbose\n"+
 		"    \tshow progress messages\n"+
 		"  -version\n"+
@@ -237,6 +274,12 @@ func Test_gobco_parseCommandLine__help(t *testing.T) {
 		"    \tcover branches, not conditions\n"+
 		"  -cover-test\n"+
 		"    \tcover the test code as well\n"+
+		"  -coverpkg list\n"+
+		"    \twith -coverprofile, the list of packages for the statement coverage, as for \"go test\"\n"+
+		"  -coverprofile file\n"+
+		"    \tin module mode, also write the statement coverage profile to this file\n"+
+		"  -exclude pattern\n"+
+		"    \tin module mode, leave the packages matching the pattern out of the report\n"+
 		"  -help\n"+
 		"    \tprint the available command line options\n"+
 		"  -immediately\n"+
@@ -245,10 +288,14 @@ func Test_gobco_parseCommandLine__help(t *testing.T) {
 		"    \tdon't remove the temporary working directory\n"+
 		"  -list-all\n"+
 		"    \tat finish, print also those conditions that are fully covered\n"+
+		"  -module\n"+
+		"    \tcover all given packages of the module with a single \"go test\" run\n"+
 		"  -stats file\n"+
 		"    \tload and persist the JSON coverage data to this file\n"+
 		"  -test option\n"+
 		"    \tpass the option to \"go test\", such as -vet=off\n"+
+		"  -threshold percentage\n"+
+		"    \texit with status 1 if the coverage is below this percentage\n"+
 		"  -verbose\n"+
 		"    \tshow progress messages\n"+
 		"  -version\n"+
@@ -299,6 +346,7 @@ func Test_gobco_instrument(t *testing.T) {
 		"fail_test.go",
 		"gobco_fixed.go",
 		"gobco_no_testmain_test.go",
+		"gobco_single.go",
 		"gobco_variable.go",
 		"random.go"})
 
@@ -395,6 +443,7 @@ func Test_gobco_cleanup(t *testing.T) {
 		"fail_test.go",
 		"gobco_fixed.go",
 		"gobco_no_testmain_test.go",
+		"gobco_single.go",
 		"gobco_variable.go",
 		"random.go"})
 
@@ -417,7 +466,7 @@ func Test_gobcoMain__test_fails(t *testing.T) {
 	stderr := s.Stderr()
 
 	s.CheckNotContains(stderr, "[build failed]")
-	s.CheckContains(stdout, "Condition coverage: 5/8")
+	s.CheckContains(stdout, "Condition coverage: 5/8 (62.5%)")
 }
 
 func Test_gobcoMain__single_file(t *testing.T) {
@@ -430,12 +479,14 @@ func Test_gobcoMain__single_file(t *testing.T) {
 	s.CheckNotContains(stdout, "[build failed]")
 	s.CheckNotContains(stderr, "[build failed]")
 	s.CheckEquals(s.GobcoLines(stdout), []string{
-		"Condition coverage: 5/6",
+		"Condition coverage: 5/6 (83.3%)",
 		"testdata/failing/fail.go:4:14: condition \"i < 10\" was 10 times true and once false",
 		"testdata/failing/fail.go:7:6: condition \"a < 1000\" was 5 times true and once false",
 		"testdata/failing/fail.go:10:5: condition \"Bar(a) == 10\" was once false but never true",
 		// testdata/failing/random.go is not listed here
 		// since that file is not mentioned in the command line.
+		"Per-file coverage:",
+		"  testdata/failing/fail.go: 5/6 (83.3%)",
 	})
 }
 
@@ -450,11 +501,14 @@ func Test_gobcoMain__multiple_files(t *testing.T) {
 	s.CheckNotContains(stderr, "[build failed]")
 	// Ensure that the files in the output are sorted.
 	s.CheckEquals(s.GobcoLines(stdout), []string{
-		"Condition coverage: 5/8",
+		"Condition coverage: 5/8 (62.5%)",
 		"testdata/failing/fail.go:4:14: condition \"i < 10\" was 10 times true and once false",
 		"testdata/failing/fail.go:7:6: condition \"a < 1000\" was 5 times true and once false",
 		"testdata/failing/fail.go:10:5: condition \"Bar(a) == 10\" was once false but never true",
 		"testdata/failing/random.go:8:9: condition \"x == 4\" was never evaluated",
+		"Per-file coverage:",
+		"  testdata/failing/fail.go: 5/6 (83.3%)",
+		"  testdata/failing/random.go: 0/2 (0.0%)",
 	})
 }
 
@@ -466,13 +520,33 @@ func Test_gobcoMain__TestMain(t *testing.T) {
 
 	s.CheckNotContains(stdout, "[build failed]")
 	s.CheckEquals(s.GobcoLines(stdout), []string{
-		"Condition coverage: 1/2",
+		"Condition coverage: 1/2 (50.0%)",
 		"testdata/testmain/main.go:8:9: " +
 			"condition \"i > 0\" was once true but never false",
+		"Per-file coverage:",
+		"  testdata/testmain/main.go: 1/2 (50.0%)",
 	})
 	s.CheckContains(stdout, "begin original TestMain")
 	s.CheckContains(stdout, "end original TestMain")
 	_ = stderr
+}
+
+// A TestMain that does not call os.Exit still writes the results.
+func Test_gobcoMain__TestMain_without_exit(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	stdout, _ := s.RunMain(0, "gobco", "-verbose", "testdata/testmainreturn")
+
+	s.CheckEquals(s.GobcoLines(stdout), []string{
+		"Condition coverage: 1/2 (50.0%)",
+		"testdata/testmainreturn/main.go:4:9: " +
+			"condition \"i > 0\" was once true but never false",
+		"Per-file coverage:",
+		"  testdata/testmainreturn/main.go: 1/2 (50.0%)",
+	})
+	s.CheckContains(stdout, "begin original TestMain")
+	s.CheckContains(stdout, "deferred in TestMain")
 }
 
 func Test_gobcoMain__TestMainTest(t *testing.T) {
@@ -481,7 +555,7 @@ func Test_gobcoMain__TestMainTest(t *testing.T) {
 
 	stdout, stderr := s.RunMain(0, "gobco", "-verbose", "testdata/testmaintest")
 
-	s.CheckContains(stdout, "Condition coverage: 1/2")
+	s.CheckContains(stdout, "Condition coverage: 1/2 (50.0%)")
 	_ = stderr
 }
 
@@ -491,7 +565,7 @@ func Test_gobcoMain__oddeven(t *testing.T) {
 
 	stdout, stderr := s.RunMain(0, "gobco", "testdata/oddeven")
 
-	s.CheckContains(stdout, "Condition coverage: 0/2")
+	s.CheckContains(stdout, "Condition coverage: 0/2 (0.0%)")
 	s.CheckContains(stdout, "odd.go:4:9: condition \"x%2 != 0\" was never evaluated")
 	// The condition in even_test.go is not instrumented since
 	// gobco was not run with the '-cover-test' option.
@@ -505,7 +579,7 @@ func Test_gobcoMain__blackBox(t *testing.T) {
 	stdout, stderr := s.RunMain(0, "gobco", "-cover-test", "testdata/pkgname")
 
 	s.CheckEquals(s.GobcoLines(stdout), []string{
-		"Condition coverage: 4/8",
+		"Condition coverage: 4/8 (50.0%)",
 		"testdata/pkgname/main.go:4:5: " +
 			"condition \"cond\" was once true but never false",
 		"testdata/pkgname/main.go:11:5: " +
@@ -516,6 +590,10 @@ func Test_gobcoMain__blackBox(t *testing.T) {
 		"testdata/pkgname/black_box_test.go:12:5: " +
 			"condition \"pkgname.Exported(true) != 'E'\" " +
 			"was once false but never true",
+		"Per-file coverage:",
+		"  testdata/pkgname/main.go: 2/4 (50.0%)",
+		"  testdata/pkgname/white_box_test.go: 1/2 (50.0%)",
+		"  testdata/pkgname/black_box_test.go: 1/2 (50.0%)",
 	})
 	s.CheckEquals(stderr, "")
 }
@@ -527,7 +605,7 @@ func Test_gobcoMain__condition(t *testing.T) {
 	stdout, stderr := s.RunMain(0, "gobco", "./testdata/branch")
 
 	s.CheckEquals(s.GobcoLines(stdout), []string{
-		"Condition coverage: 0/12",
+		"Condition coverage: 0/12 (0.0%)",
 		"testdata/branch/branch.go:6:5: " +
 			"condition \"x > 0\" was never evaluated",
 		"testdata/branch/branch.go:6:14: " +
@@ -540,6 +618,8 @@ func Test_gobcoMain__condition(t *testing.T) {
 			"condition \"x == 30\" was never evaluated",
 		"testdata/branch/branch.go:12:15: " +
 			"condition \"x == 40\" was never evaluated",
+		"Per-file coverage:",
+		"  testdata/branch/branch.go: 0/12 (0.0%)",
 	})
 	s.CheckEquals(stderr, "")
 }
@@ -551,7 +631,7 @@ func Test_gobcoMain__branch(t *testing.T) {
 	stdout, stderr := s.RunMain(0, "gobco", "-branch", "./testdata/branch")
 
 	s.CheckEquals(s.GobcoLines(stdout), []string{
-		"Branch coverage: 0/10",
+		"Branch coverage: 0/10 (0.0%)",
 		"testdata/branch/branch.go:6:5: " +
 			"condition \"x > 0 && x > 100\" was never evaluated",
 		"testdata/branch/branch.go:10:7: " +
@@ -562,6 +642,8 @@ func Test_gobcoMain__branch(t *testing.T) {
 			"condition \"x == 30\" was never evaluated",
 		"testdata/branch/branch.go:12:15: " +
 			"condition \"x == 40\" was never evaluated",
+		"Per-file coverage:",
+		"  testdata/branch/branch.go: 0/10 (0.0%)",
 	})
 	s.CheckEquals(stderr, "")
 }
@@ -573,9 +655,11 @@ func Test_gobcoMain__issue38(t *testing.T) {
 	stdout, stderr := s.RunMain(0, "gobco", "./testdata/issue38")
 
 	s.CheckEquals(s.GobcoLines(stdout), []string{
-		"Condition coverage: 1/2",
+		"Condition coverage: 1/2 (50.0%)",
 		"testdata/issue38/main.go:4:5: " +
 			"condition \"a >= 0\" was 2 times true but never false",
+		"Per-file coverage:",
+		"  testdata/issue38/main.go: 1/2 (50.0%)",
 	})
 	s.CheckEquals(stderr, "")
 }

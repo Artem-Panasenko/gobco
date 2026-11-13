@@ -75,6 +75,16 @@ type instrumenter struct {
 	// The conditions from the original code that were instrumented,
 	// from all files from fset.
 	conds []cond
+
+	// In module mode, the importer shared by all packages,
+	// the import path of the registry package,
+	// and the name of the package in its stats files.
+	importer  types.Importer
+	regPath   string
+	statsName string
+
+	// In module mode, the import path of the package.
+	importPath string
 }
 
 // instrument modifies the code of the Go package from srcDir
@@ -111,7 +121,10 @@ func (i *instrumenter) instrument(srcDir, singleFile, dstDir string) bool {
 }
 
 func (i *instrumenter) resolveTypes(pkgsMap map[string]*ast.Package) {
-	imp := importer.ForCompiler(i.fset, "source", nil)
+	imp := i.importer
+	if imp == nil {
+		imp = importer.ForCompiler(i.fset, "source", nil)
+	}
 	conf := types.Config{Importer: imp}
 	info := types.Info{
 		Types: make(map[ast.Expr]types.TypeAndValue),
@@ -617,14 +630,56 @@ func (i *instrumenter) instrumentTestMain(astFile *ast.File) {
 				i.hasTestMain = true
 
 				ast.Inspect(decl.Body, wrap)
+				if !done {
+					done = i.wrapRun(decl)
+				}
 				assert(done, "gobco can only handle TestMain with explicit call to os.Exit")
 			}
 		}
 	}
 }
 
+// wrapRun handles a TestMain function that does not call os.Exit.
+// Since go1.15, the test binary then exits with the result of m.Run, so
+// the call to m.Run is replaced with GobcoFinish(m.Run()).
+func (i *instrumenter) wrapRun(decl *ast.FuncDecl) bool {
+	params := decl.Type.Params.List
+	if len(params) != 1 || len(params[0].Names) != 1 {
+		return false
+	}
+	m := params[0].Names[0].Name
+
+	done := false
+	ast.Inspect(decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) != 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Run" {
+			return true
+		}
+		if recv, ok := sel.X.(*ast.Ident); !ok || recv.Name != m {
+			return true
+		}
+
+		run := *call
+		gen := codeGenerator{call.Pos()}
+		*call = *gen.callFinish(&run).(*ast.CallExpr)
+		done = true
+		return false
+	})
+	return done
+}
+
 //go:embed templates/gobco_fixed.go
 var fixedTemplate string
+
+//go:embed templates/gobco_single.go
+var singleTemplate string
+
+//go:embed templates/gobco_module.go
+var moduleTemplate string
 
 //go:embed templates/gobco_no_testmain_test.go
 var noTestMainTemplate string
@@ -633,12 +688,28 @@ func (i *instrumenter) writeGobcoFiles(tmpDir string, pkgs []*ast.Package) {
 	pkgname := pkgs[0].Name
 	fixPkgname := func(str string) string {
 		str = strings.TrimPrefix(str, "//go:build ignore\n// +build ignore\n\n")
+		str = strings.Replace(str, "\"GOBCOREG\"", strconv.Quote(i.regPath), 1)
+		str = strings.Replace(str, "\"GOBCOSTATS\"", strconv.Quote(i.statsName), 1)
 		return strings.Replace(str, "package main\n", "package "+pkgname+"\n", 1)
 	}
 	writeFile(filepath.Join(tmpDir, "gobco_fixed.go"), fixPkgname(fixedTemplate))
+	if i.regPath == "" {
+		writeFile(filepath.Join(tmpDir, "gobco_single.go"), fixPkgname(singleTemplate))
+	} else {
+		writeFile(filepath.Join(tmpDir, "gobco_module.go"), fixPkgname(moduleTemplate))
+	}
 	i.writeGobcoGo(filepath.Join(tmpDir, "gobco_variable.go"), pkgname)
 
-	if !i.hasTestMain {
+	// In module mode, a package without tests gets no test binary of its
+	// own, as in a plain "go test". The test binaries of the other packages
+	// save its counters.
+	hasTests := false
+	for _, pkg := range pkgs {
+		forEachFile(pkg, func(name string, _ *ast.File) {
+			hasTests = hasTests || strings.HasSuffix(name, "_test.go")
+		})
+	}
+	if !i.hasTestMain && (i.regPath == "" || hasTests) {
 		writeFile(filepath.Join(tmpDir, "gobco_no_testmain_test.go"), fixPkgname(noTestMainTemplate))
 	}
 
@@ -695,6 +766,12 @@ func (i *instrumenter) writeGobcoBlackBox(pkgs []*ast.Package, dstDir string) {
 				}
 			}
 		})
+	}
+
+	// The black box tests may import the package under another name,
+	// or not at all.
+	if i.importPath != "" {
+		pkgName, pkgPath = "gobcoMain", i.importPath
 	}
 
 	text := "" +

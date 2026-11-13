@@ -313,6 +313,26 @@ func Test_gobcoMain__module_black_box_alias(t *testing.T) {
 	s.CheckEquals(s.Stderr(), "")
 }
 
+// A directory with only the files of an external test package, whose name
+// sorts before the files that gobco adds.
+func Test_gobcoMain__module_external_tests_only(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+	dir := writeModule(t, map[string]string{
+		"go.mod":        "module example.com/m\n\ngo 1.16\n",
+		"ext/a_test.go": "package ext_test\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
+		"p/p.go": "package p\n\n" +
+			"func Abs(x int) int {\n\tif x < 0 {\n\t\treturn -x\n\t}\n\treturn x\n}\n",
+		"p/p_test.go": "package p\n\nimport \"testing\"\n\nfunc TestAbs(t *testing.T) {\n\tif Abs(-1) != 1 {\n\t\tt.Error(\"fail\")\n\t}\n}\n",
+	})
+
+	exitCode := s.runIn(dir, "gobco", "-module")
+
+	s.CheckEquals(exitCode, 0)
+	s.CheckContains(s.Stdout(), "Condition coverage: 1/2 (50.0%)")
+	s.CheckEquals(s.Stderr(), "")
+}
+
 func Test_testOutput(t *testing.T) {
 	s := NewSuite(t)
 	defer s.TearDownTest()

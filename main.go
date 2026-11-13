@@ -141,6 +141,7 @@ func (g *gobco) parseOptions(argv []string) []string {
 
 	err := flags.Parse(argv[1:])
 	if g.exitCode != 0 {
+		g.cleanUp()
 		exit(g.exitCode)
 	}
 	g.check(err)
@@ -148,11 +149,13 @@ func (g *gobco) parseOptions(argv []string) []string {
 	if help {
 		flags.SetOutput(g.stdout)
 		flags.Usage()
+		g.cleanUp()
 		exit(0)
 	}
 
 	if ver {
 		g.outf("%s", version)
+		g.cleanUp()
 		exit(0)
 	}
 
@@ -349,6 +352,7 @@ func (g *gobco) newInstrumenter() instrumenter {
 		"",
 		"",
 		"",
+		nil,
 	}
 }
 

@@ -114,6 +114,28 @@ statements can be slightly higher than for a plain `go test`.
 Lines are the same as in the source, but columns in lines with a condition are
 shifted.
 
+## Ignoring conditions that no test can reach
+
+A condition that starts on the line of a comment `//gobco:ignore`, or on the
+line below it, is not instrumented: it is neither counted nor listed.
+
+~~~go
+func abs(x int) int {
+	//gobco:ignore
+	if x > math.MaxInt32 { // The caller never passes such a value.
+		panic("unreachable")
+	}
+	if x == 0 { //gobco:ignore
+		return 0
+	}
+	...
+}
+~~~
+
+Text may follow the marker after a space, such as the reason.
+The marker only affects gobco; the statement coverage of `go test -cover` and
+the cover profile stay as they are.
+
 ## Adding custom test conditions
 
 If you want to ensure that the tests cover a certain condition in your code,

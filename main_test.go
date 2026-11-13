@@ -305,6 +305,23 @@ func Test_gobco_parseCommandLine__help(t *testing.T) {
 	g.cleanUp()
 }
 
+// The options -help and -version, and a wrong option, leave no temporary files.
+func Test_gobco_parseCommandLine__removes_tmpdir(t *testing.T) {
+	for _, option := range []string{"-help", "-version", "-invalid"} {
+		s := NewSuite(t)
+		g := s.newGobco()
+
+		s.CheckPanics(func() { g.parseCommandLine([]string{"gobco", option}) }, exited(map[string]int{
+			"-help": 0, "-version": 0, "-invalid": 2,
+		}[option]))
+
+		_, err := os.Stat(g.tmpdir)
+		s.CheckEquals(os.IsNotExist(err), true)
+		_, _ = s.Stdout(), s.Stderr()
+		s.TearDownTest()
+	}
+}
+
 func Test_gobco_parseCommandLine__version(t *testing.T) {
 	s := NewSuite(t)
 	defer s.TearDownTest()
@@ -547,6 +564,35 @@ func Test_gobcoMain__TestMain_without_exit(t *testing.T) {
 	})
 	s.CheckContains(stdout, "begin original TestMain")
 	s.CheckContains(stdout, "deferred in TestMain")
+}
+
+// A condition that starts on the line of the comment "//gobco:ignore",
+// or on the line below it, is not counted and not listed.
+func Test_gobcoMain__ignore(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	stdout, stderr := s.RunMain(0, "gobco", "-list-all", "testdata/ignore")
+
+	s.CheckEquals(s.GobcoLines(stdout), []string{
+		"Condition coverage: 3/4 (75.0%)",
+		"testdata/ignore/main.go:8:5: condition \"x < 0\" was once true and once false",
+		"testdata/ignore/main.go:14:5: condition \"x == 8\" was once false but never true",
+		"Per-file coverage:",
+		"  testdata/ignore/main.go: 3/4 (75.0%)",
+	})
+	s.CheckEquals(stderr, "")
+}
+
+// A directory with only the files of an external test package.
+func Test_gobcoMain__external_tests_only(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	stdout, stderr := s.RunMain(0, "gobco", "testdata/exttestonly")
+
+	s.CheckContains(stdout, "Condition coverage: 0/0 (100.0%)")
+	s.CheckNotContains(stderr, "found packages")
 }
 
 func Test_gobcoMain__TestMainTest(t *testing.T) {

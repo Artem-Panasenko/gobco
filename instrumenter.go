@@ -85,6 +85,9 @@ type instrumenter struct {
 
 	// In module mode, the import path of the package.
 	importPath string
+
+	// The lines that have a comment "//gobco:ignore", by file name.
+	ignoreLines map[string]map[int]bool
 }
 
 // instrument modifies the code of the Go package from srcDir
@@ -164,6 +167,7 @@ func (i *instrumenter) resolveTypes(pkgsMap map[string]*ast.Package) {
 func (i *instrumenter) instrumentFile(filename string, astFile *ast.File, dstDir string) {
 	isTest := strings.HasSuffix(filename, "_test.go")
 	if (i.coverTest || !isTest) && shouldBuild(filename) {
+		i.findIgnores(astFile)
 		i.instrumentFileNode(astFile)
 	}
 	if isTest {
@@ -548,12 +552,36 @@ func (i *instrumenter) callCover(expr ast.Expr, pos token.Pos, code string) ast.
 		// don't instrument generated code, such as yacc parsers
 		return expr
 	}
+	if lines := i.ignoreLines[start.Filename]; lines[start.Line] || lines[start.Line-1] {
+		return expr
+	}
 
 	i.conds = append(i.conds, cond{start.String(), code})
 	idx := len(i.conds) - 1
 
 	gen := codeGenerator{pos}
 	return gen.callGobcoCover(idx, expr, i.typ[expr], i.typePkg)
+}
+
+// findIgnores remembers the lines that have a comment "//gobco:ignore".
+// A condition that starts on such a line, or on the line below it,
+// is not instrumented, so it is neither counted nor listed.
+func (i *instrumenter) findIgnores(f *ast.File) {
+	for _, group := range f.Comments {
+		for _, c := range group.List {
+			if c.Text != "//gobco:ignore" && !strings.HasPrefix(c.Text, "//gobco:ignore ") {
+				continue
+			}
+			pos := i.fset.Position(c.Slash)
+			if i.ignoreLines == nil {
+				i.ignoreLines = map[string]map[int]bool{}
+			}
+			if i.ignoreLines[pos.Filename] == nil {
+				i.ignoreLines[pos.Filename] = map[int]bool{}
+			}
+			i.ignoreLines[pos.Filename][pos.Line] = true
+		}
+	}
 }
 
 // strEql returns the string representation of (lhs == rhs).
@@ -686,6 +714,12 @@ var noTestMainTemplate string
 
 func (i *instrumenter) writeGobcoFiles(tmpDir string, pkgs []*ast.Package) {
 	pkgname := pkgs[0].Name
+	if len(pkgs) == 1 && onlyTestFiles(pkgs[0]) {
+		// A directory with only the files of an external test package
+		// belongs to the package without the suffix. The files that gobco
+		// adds must not be in the package of the test files.
+		pkgname = strings.TrimSuffix(pkgname, "_test")
+	}
 	fixPkgname := func(str string) string {
 		str = strings.TrimPrefix(str, "//go:build ignore\n// +build ignore\n\n")
 		str = strings.Replace(str, "\"GOBCOREG\"", strconv.Quote(i.regPath), 1)
@@ -1041,6 +1075,15 @@ func subst(
 }
 
 // sortedPkgs returns 'package x' first, followed by 'package x_test'.
+func onlyTestFiles(pkg *ast.Package) bool {
+	for name := range pkg.Files {
+		if !strings.HasSuffix(name, "_test.go") {
+			return false
+		}
+	}
+	return true
+}
+
 func sortedPkgs(m map[string]*ast.Package) []*ast.Package {
 	var pkgs []*ast.Package
 	for _, pkg := range m {

@@ -57,6 +57,10 @@ type gobco struct {
 	// The copy of the module in which the tests ran with a cover profile.
 	treeDir string
 
+	// The root directory and the registry package of the module.
+	modRoot string
+	regPath string
+
 	goTestArgs []string
 	exclude    []string
 	patterns   []string

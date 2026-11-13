@@ -697,7 +697,16 @@ func (i *instrumenter) writeGobcoFiles(tmpDir string, pkgs []*ast.Package) {
 	}
 	i.writeGobcoGo(filepath.Join(tmpDir, "gobco_variable.go"), pkgname)
 
-	if !i.hasTestMain {
+	// In module mode, a package without tests gets no test binary of its
+	// own, as in a plain "go test". The test binaries of the other packages
+	// save its counters.
+	hasTests := false
+	for _, pkg := range pkgs {
+		forEachFile(pkg, func(name string, _ *ast.File) {
+			hasTests = hasTests || strings.HasSuffix(name, "_test.go")
+		})
+	}
+	if !i.hasTestMain && (i.regPath == "" || hasTests) {
 		writeFile(filepath.Join(tmpDir, "gobco_no_testmain_test.go"), fixPkgname(noTestMainTemplate))
 	}
 

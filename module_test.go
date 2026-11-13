@@ -169,7 +169,8 @@ func Test_gobcoMain__module_build_fails(t *testing.T) {
 	s.CheckContains(stderr, "gobco: go list: exit status 1")
 }
 
-// When a test fails, the coverage is still reported.
+// When a test fails, its output is the last thing in the log,
+// and the coverage is not reported.
 func Test_gobcoMain__module_test_fails(t *testing.T) {
 	s := NewSuite(t)
 	defer s.TearDownTest()
@@ -184,8 +185,13 @@ func Test_gobcoMain__module_test_fails(t *testing.T) {
 	exitCode := s.runIn(dir, "gobco", "-module")
 
 	s.CheckEquals(exitCode, 1)
-	s.CheckContains(s.Stdout(), "Condition coverage: 1/2 (50.0%)")
-	s.CheckContains(s.Stderr(), "go test ./...: exit status 1")
+	stdout := s.Stdout()
+	s.CheckContains(stdout, "--- FAIL: TestAbs")
+	s.CheckNotContains(stdout, "coverage:")
+	s.CheckNotContains(stdout, "gobcoreg")
+	s.CheckEquals(s.Stderr(), ""+
+		"go test ./...: exit status 1\n"+
+		"gobco: the tests failed, so the coverage is not reported\n")
 }
 
 func Test_gobcoMain__module_threshold(t *testing.T) {
@@ -286,4 +292,36 @@ func Test_gobcoMain__module_coverprofile_needs_module(t *testing.T) {
 		s.runIn("testdata/module", "gobco", "-module", "-coverpkg", "./...")
 	}, exited(1))
 	s.CheckEquals(s.Stderr(), "gobco: -coverpkg needs -coverprofile\n")
+}
+
+func Test_testOutput(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	o := testOutput{w: &s.out, regPath: "example.com/m/gobcoreg", tree: "/tmp/tree", root: "/src/m"}
+	_, _ = o.Write([]byte("" +
+		"?   \texample.com/m/gobcoreg\t[no test files]\n" +
+		"\texample.com/m/gobcoreg\t\tcoverage: 0.0% of statements\n" +
+		"ok  \texample.com/m/a\t0.010s\tcoverage: 12.3% of statements in ./...\n" +
+		"\texample.com/m/b\t\tcoverage: 0.0% of statements\n" +
+		"coverage: 12.3% of statements in ./...\n" +
+		"\t/tmp/tree/a/a.go:7 +0x10\n" +
+		"FAIL\texample.com/m/c\t0.020s\n" +
+		"no newline"))
+	o.flush()
+
+	s.CheckEquals(s.Stdout(), ""+
+		"ok  \texample.com/m/a\t0.010s\n"+
+		"?   \texample.com/m/b\t[no test files]\n"+
+		"\t/src/m/a/a.go:7 +0x10\n"+
+		"FAIL\texample.com/m/c\t0.020s\n"+
+		"no newline")
+
+	// Without a copy of the module, only the registry package is left out.
+	o = testOutput{w: &s.out, regPath: "example.com/m/gobcoreg"}
+	_, _ = o.Write([]byte("" +
+		"?   \texample.com/m/gobcoreg\t[no test files]\n" +
+		"ok  \texample.com/m/a\t0.010s\tcoverage: 12.3% of statements\n"))
+
+	s.CheckEquals(s.Stdout(), "ok  \texample.com/m/a\t0.010s\tcoverage: 12.3% of statements\n")
 }

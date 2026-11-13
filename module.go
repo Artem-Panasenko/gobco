@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -68,6 +69,7 @@ type modulePkg struct {
 // by running the tests of the whole module once.
 func (g *gobco) runModule() {
 	modRoot, modPath := g.findModule()
+	g.modRoot, g.regPath = modRoot, modPath+"/gobcoreg"
 	pkgs := g.listPackages(modRoot, g.patterns)
 	if len(g.exclude) > 0 {
 		excluded := map[string]bool{}
@@ -94,7 +96,7 @@ func (g *gobco) runModule() {
 		tree = g.mirrorModule(modRoot)
 	}
 
-	overlayFile, found := g.instrumentModule(modRoot, modPath+"/gobcoreg", tree, pkgs)
+	overlayFile, found := g.instrumentModule(modRoot, g.regPath, tree, pkgs)
 	if !found {
 		g.outf("nothing to instrument")
 		return
@@ -102,7 +104,9 @@ func (g *gobco) runModule() {
 
 	statsDir := g.file("stats")
 	g.check(os.MkdirAll(statsDir, 0o777))
-	g.runModuleTests(overlayFile, statsDir, tree)
+	if !g.runModuleTests(overlayFile, statsDir, tree) {
+		return
+	}
 	g.mergeStats(statsDir, pkgs)
 	if tree != "" {
 		g.statements = g.writeCoverProfile(g.file("cover.out"), g.coverProfile)
@@ -289,8 +293,11 @@ func (g *gobco) mirrorModule(modRoot string) string {
 		switch {
 		case d.Name() == ".git" && d.IsDir():
 			return filepath.SkipDir
-		case rel == "vendor" && d.IsDir():
-			return filepath.SkipDir
+		case rel == "vendor":
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		case d.IsDir():
 			return os.MkdirAll(dst, 0o777)
 		case d.Type()&fs.ModeSymlink != 0:
@@ -376,8 +383,13 @@ func (g *gobco) writeCoverProfile(raw, dst string) *tally {
 }
 
 // runModuleTests runs the tests of the whole module on the instrumented
-// code. Each test process saves its counters to statsDir.
-func (g *gobco) runModuleTests(overlayFile, statsDir, tree string) {
+// code and returns whether they passed. Each test process saves its counters
+// to statsDir.
+//
+// When a test fails, the coverage is not reported: a test binary that panics
+// or times out does not save its counters, and the output of the failed test
+// should be the last thing in the log.
+func (g *gobco) runModuleTests(overlayFile, statsDir, tree string) bool {
 	// "go vet" cannot handle the registry package,
 	// which only exists in the overlay.
 	extraArgs := []string{"-vet=off"}
@@ -393,15 +405,76 @@ func (g *gobco) runModuleTests(overlayFile, statsDir, tree string) {
 	args := goTest{}.args(g.verbose, "./...", extraArgs)
 	cmd := exec.Command("go", args[1:]...)
 	cmd.Dir = tree
-	cmd.Stdout = g.stdout
-	cmd.Stderr = g.stderr
+	stdout := &testOutput{w: g.stdout, regPath: g.regPath, tree: tree, root: g.modRoot}
+	stderr := &testOutput{w: g.stderr, regPath: g.regPath, tree: tree, root: g.modRoot}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	cmd.Env = append(os.Environ(), "GOBCO_STATS_DIR="+statsDir)
 
 	g.verbosef("Running %q", strings.Join(args, " "))
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	stdout.flush()
+	stderr.flush()
+	if err != nil {
 		g.errf("go test ./...: %s", err)
+		g.errf("gobco: the tests failed, so the coverage is not reported")
 		g.exitCode = 1
 	}
+	return err == nil
+}
+
+// testOutput passes the output of "go test" on line by line, without what
+// only gobco causes: the registry package, and the coverage that "go test"
+// reports for each package, which includes the files that gobco injects.
+// In a copy of the module, paths in the output point to the original files.
+type testOutput struct {
+	w       io.Writer
+	regPath string
+	tree    string
+	root    string
+	buf     []byte
+}
+
+func (o *testOutput) Write(p []byte) (int, error) {
+	o.buf = append(o.buf, p...)
+	for {
+		i := bytes.IndexByte(o.buf, '\n')
+		if i == -1 {
+			return len(p), nil
+		}
+		o.line(string(o.buf[:i+1]))
+		o.buf = o.buf[i+1:]
+	}
+}
+
+func (o *testOutput) flush() {
+	if len(o.buf) > 0 {
+		o.line(string(o.buf))
+		o.buf = nil
+	}
+}
+
+func (o *testOutput) line(line string) {
+	if strings.Contains(line, "\t"+o.regPath+"\t") &&
+		(strings.HasPrefix(line, "?") || strings.HasPrefix(line, "\t")) {
+		return
+	}
+	if o.tree != "" {
+		if strings.HasPrefix(line, "coverage: ") && strings.Contains(line, "% of statements") {
+			return
+		}
+		line = strings.ReplaceAll(line, o.tree+"/", o.root+"/")
+		if i := strings.Index(line, "\tcoverage: "); i != -1 {
+			if strings.HasPrefix(line, "\t") {
+				// A package without tests, as "go test" prints it
+				// when it does not measure the coverage.
+				line = "?   " + strings.TrimRight(line[:i], "\t") + "\t[no test files]\n"
+			} else {
+				line = line[:i] + "\n"
+			}
+		}
+	}
+	_, _ = io.WriteString(o.w, line)
 }
 
 // mergeStats adds the counters from the stats files of all test processes

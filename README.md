@@ -64,6 +64,13 @@ The module is not copied and the working tree is not modified.
 A test directory that has its own `TestMain` must be among the packages,
 so that it saves the counters when it exits.
 
+The output of `go test` is passed on as it is, so a failing test, a panic or
+a timeout reads the same as in a plain `go test` run, and gobco exits with
+status 1. In that case gobco does not report the coverage: a test binary that
+panics or times out does not save its counters, and the output of the failed
+test stays the last thing in the log. A package that does not compile stops
+gobco with the message from the compiler, before any test runs.
+
 `-exclude` leaves packages out of the report and the totals,
 `-threshold` makes gobco exit with status 1 below the given percentage.
 
@@ -97,10 +104,13 @@ overlay, so with `-coverprofile` gobco runs the tests in a copy of the module
 (without `.git`, and with `vendor` linked), in a temporary directory that
 depends only on the module. The first run compiles everything in that
 directory, later runs use the build cache. The copy is removed at the end.
+Paths in the output of the tests, such as in a stack trace, point to the
+original files. The tests themselves see the copy as their working directory.
 
-The profile leaves out the files that gobco injects. Gobco also rewrites some
-statements, such as `switch`, so the number of statements can be slightly
-higher than for a plain `go test`; the uncovered statements are the same.
+The profile leaves out the files that gobco injects, and gobco does not pass
+on the coverage that `go test` prints for each package, since that includes
+them. Gobco also rewrites some statements, such as `switch`, so the number of
+statements can be slightly higher than for a plain `go test`.
 Lines are the same as in the source, but columns in lines with a condition are
 shifted.
 

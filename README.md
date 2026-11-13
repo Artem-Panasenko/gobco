@@ -75,6 +75,35 @@ $ gobco -module -branch -exclude ./internal/generated/... ./internal/... ./test/
 Branch coverage: 3/4 (75.0%)
 ~~~
 
+### Statement coverage in the same run
+
+With `-coverprofile file`, the same test run also measures the statement
+coverage, as `go test -cover` does, and gobco writes the profile to `file`:
+
+~~~text
+$ gobco -module -branch -coverprofile=cover.out -coverpkg=./internal/... ./internal/... ./test/integration
+...
+Branch coverage: 3/4 (75.0%)
+Statement coverage: 6/7 (85.7%)
+~~~
+
+`-coverpkg` is passed on to `go test` and chooses the packages that the
+statement coverage counts. The profile has the usual format, so
+`go tool cover -func=cover.out` and `go tool cover -html=cover.out` work.
+Gobco itself does not write an HTML report.
+
+The Go cover tool reads the source files from the disk and ignores the
+overlay, so with `-coverprofile` gobco runs the tests in a copy of the module
+(without `.git`, and with `vendor` linked), in a temporary directory that
+depends only on the module. The first run compiles everything in that
+directory, later runs use the build cache. The copy is removed at the end.
+
+The profile leaves out the files that gobco injects. Gobco also rewrites some
+statements, such as `switch`, so the number of statements can be slightly
+higher than for a plain `go test`; the uncovered statements are the same.
+Lines are the same as in the source, but columns in lines with a condition are
+shifted.
+
 ## Adding custom test conditions
 
 If you want to ensure that the tests cover a certain condition in your code,

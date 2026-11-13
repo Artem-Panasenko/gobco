@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,8 +10,10 @@ import (
 	"go/token"
 	"go/types"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -83,16 +87,26 @@ func (g *gobco) runModule() {
 	// including those in the report.
 	g.check(os.Chdir(modRoot))
 
-	overlayFile := g.instrumentModule(modRoot, modPath+"/gobcoreg", pkgs)
-	if overlayFile == "" {
+	// The cover tool reads the source files from the disk and ignores
+	// the overlay, so a statement coverage profile needs a copy of the module.
+	tree := ""
+	if g.coverProfile != "" {
+		tree = g.mirrorModule(modRoot)
+	}
+
+	overlayFile, found := g.instrumentModule(modRoot, modPath+"/gobcoreg", tree, pkgs)
+	if !found {
 		g.outf("nothing to instrument")
 		return
 	}
 
 	statsDir := g.file("stats")
 	g.check(os.MkdirAll(statsDir, 0o777))
-	g.runModuleTests(overlayFile, statsDir)
+	g.runModuleTests(overlayFile, statsDir, tree)
 	g.mergeStats(statsDir, pkgs)
+	if tree != "" {
+		g.statements = g.writeCoverProfile(g.file("cover.out"), g.coverProfile)
+	}
 
 	var reports []pkgReport
 	for _, pkg := range pkgs {
@@ -175,17 +189,24 @@ func (g *gobco) exportImporter() types.Importer {
 	return importer.ForCompiler(token.NewFileSet(), "gc", lookup)
 }
 
-// instrumentModule writes the instrumented packages to the temporary
-// directory and returns the overlay file that makes "go test" use them,
-// or "" if there is nothing to instrument.
+// instrumentModule writes the instrumented packages and returns whether
+// there was anything to instrument.
+//
+// Without a copy of the module (tree), the instrumented files go to the
+// temporary directory, and the result is the overlay file that makes
+// "go test" use them. Otherwise they replace the files in the copy.
 //
 // The stats files of a package are named after its index in pkgs.
-func (g *gobco) instrumentModule(modRoot, regPath string, pkgs []modulePkg) string {
+func (g *gobco) instrumentModule(modRoot, regPath, tree string, pkgs []modulePkg) (overlayFile string, found bool) {
 	imp := g.exportImporter()
 	overlay := map[string]string{}
 	for idx := range pkgs {
 		pkg := &pkgs[idx]
 		dst := g.file(filepath.Join("overlay", strconv.Itoa(idx)))
+		if tree != "" {
+			dst = filepath.Join(tree, filepath.FromSlash(pkg.dir))
+			g.removeGoFiles(dst)
+		}
 		g.check(os.MkdirAll(dst, 0o777))
 
 		in := g.newInstrumenter()
@@ -196,6 +217,7 @@ func (g *gobco) instrumentModule(modRoot, regPath string, pkgs []modulePkg) stri
 			continue
 		}
 		g.verbosef("Instrumented %s to %s", pkg.dir, dst)
+		found = true
 
 		entries, err := os.ReadDir(dst)
 		g.check(err)
@@ -209,8 +231,14 @@ func (g *gobco) instrumentModule(modRoot, regPath string, pkgs []modulePkg) stri
 			pkg.conds[i] = condition{Start: c.pos, Code: c.text}
 		}
 	}
-	if len(overlay) == 0 {
-		return ""
+	if !found {
+		return "", false
+	}
+
+	if tree != "" {
+		g.check(os.MkdirAll(filepath.Join(tree, "gobcoreg"), 0o777))
+		writeFile(filepath.Join(tree, "gobcoreg", "gobcoreg.go"), regSource)
+		return "", true
 	}
 
 	reg := g.file("gobcoreg.go")
@@ -219,19 +247,152 @@ func (g *gobco) instrumentModule(modRoot, regPath string, pkgs []modulePkg) stri
 
 	data, err := json.MarshalIndent(map[string]interface{}{"Replace": overlay}, "", "\t")
 	g.check(err)
-	overlayFile := g.file("overlay.json")
+	overlayFile = g.file("overlay.json")
 	writeFile(overlayFile, string(data))
-	return overlayFile
+	return overlayFile, true
+}
+
+// removeGoFiles removes the Go files from the directory,
+// since the instrumenter writes all of them again.
+func (g *gobco) removeGoFiles(dir string) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return
+	}
+	g.check(err)
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".go") {
+			g.check(os.Remove(filepath.Join(dir, entry.Name())))
+		}
+	}
+}
+
+// mirrorModule copies the module to a directory that depends only on the
+// module, so that the build cache can be used by the next run.
+// The vendor directory is linked instead of copied.
+func (g *gobco) mirrorModule(modRoot string) string {
+	sum := sha256.Sum256([]byte(modRoot))
+	tree := filepath.Join(os.TempDir(), "gobco-tree-"+hex.EncodeToString(sum[:4]))
+	g.treeDir = tree
+	g.check(os.RemoveAll(tree))
+	g.check(os.MkdirAll(tree, 0o777))
+
+	g.check(filepath.WalkDir(modRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(modRoot, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		dst := filepath.Join(tree, rel)
+		switch {
+		case d.Name() == ".git" && d.IsDir():
+			return filepath.SkipDir
+		case rel == "vendor" && d.IsDir():
+			return filepath.SkipDir
+		case d.IsDir():
+			return os.MkdirAll(dst, 0o777)
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(target, dst)
+		case d.Type().IsRegular():
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if err := copyFile(path, dst); err != nil {
+				return err
+			}
+			return os.Chmod(dst, info.Mode().Perm())
+		}
+		return nil
+	}))
+	if _, err := os.Stat(filepath.Join(modRoot, "vendor")); err == nil {
+		g.check(os.Symlink(filepath.Join(modRoot, "vendor"), filepath.Join(tree, "vendor")))
+	}
+	g.verbosef("Copied the module to %s", tree)
+	return tree
+}
+
+// writeCoverProfile copies the cover profile that "go test" wrote, without
+// the files that gobco injected, and returns the statement coverage.
+//
+// A block of code appears once for each test binary that contains it,
+// and counts as covered if any of them ran it.
+func (g *gobco) writeCoverProfile(raw, dst string) *tally {
+	data, err := os.ReadFile(raw)
+	g.check(err)
+
+	injected := map[string]bool{
+		"gobco_fixed.go": true, "gobco_module.go": true, "gobco_variable.go": true,
+	}
+	var out strings.Builder
+	type block struct {
+		stmts   int
+		covered bool
+	}
+	blocks := map[string]*block{}
+	var order []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "mode:") {
+			out.WriteString(line + "\n")
+			continue
+		}
+		colon := strings.LastIndex(line, ":")
+		file := line[:colon]
+		if injected[path.Base(file)] || strings.HasSuffix(file, "/gobcoreg/gobcoreg.go") {
+			continue
+		}
+		out.WriteString(line + "\n")
+
+		fields := strings.Fields(line[colon+1:])
+		if len(fields) != 3 {
+			g.check(fmt.Errorf("gobco: unexpected line %q in the cover profile", line))
+		}
+		key := file + ":" + fields[0]
+		stmts, err1 := strconv.Atoi(fields[1])
+		count, err2 := strconv.Atoi(fields[2])
+		g.check(errors.Join(err1, err2))
+		if blocks[key] == nil {
+			blocks[key] = &block{stmts: stmts}
+			order = append(order, key)
+		}
+		blocks[key].covered = blocks[key].covered || count > 0
+	}
+	writeFile(dst, out.String())
+
+	var t tally
+	for _, key := range order {
+		t.total += blocks[key].stmts
+		if blocks[key].covered {
+			t.covered += blocks[key].stmts
+		}
+	}
+	return &t
 }
 
 // runModuleTests runs the tests of the whole module on the instrumented
 // code. Each test process saves its counters to statsDir.
-func (g *gobco) runModuleTests(overlayFile, statsDir string) {
+func (g *gobco) runModuleTests(overlayFile, statsDir, tree string) {
 	// "go vet" cannot handle the registry package,
 	// which only exists in the overlay.
-	extraArgs := append([]string{"-overlay", overlayFile, "-vet=off"}, g.goTestArgs...)
+	extraArgs := []string{"-vet=off"}
+	if tree == "" {
+		extraArgs = append(extraArgs, "-overlay", overlayFile)
+	} else {
+		extraArgs = append(extraArgs, "-cover", "-coverprofile="+g.file("cover.out"))
+		if g.coverPkg != "" {
+			extraArgs = append(extraArgs, "-coverpkg="+g.coverPkg)
+		}
+	}
+	extraArgs = append(extraArgs, g.goTestArgs...)
 	args := goTest{}.args(g.verbose, "./...", extraArgs)
 	cmd := exec.Command("go", args[1:]...)
+	cmd.Dir = tree
 	cmd.Stdout = g.stdout
 	cmd.Stderr = g.stderr
 	cmd.Env = append(os.Environ(), "GOBCO_STATS_DIR="+statsDir)

@@ -228,6 +228,10 @@ func Test_gobco_parseCommandLine__usage(t *testing.T) {
 		"    \tcover branches, not conditions\n"+
 		"  -cover-test\n"+
 		"    \tcover the test code as well\n"+
+		"  -coverpkg list\n"+
+		"    \twith -coverprofile, the list of packages for the statement coverage, as for \"go test\"\n"+
+		"  -coverprofile file\n"+
+		"    \tin module mode, also write the statement coverage profile to this file\n"+
 		"  -exclude pattern\n"+
 		"    \tin module mode, leave the packages matching the pattern out of the report\n"+
 		"  -help\n"+
@@ -270,6 +274,10 @@ func Test_gobco_parseCommandLine__help(t *testing.T) {
 		"    \tcover branches, not conditions\n"+
 		"  -cover-test\n"+
 		"    \tcover the test code as well\n"+
+		"  -coverpkg list\n"+
+		"    \twith -coverprofile, the list of packages for the statement coverage, as for \"go test\"\n"+
+		"  -coverprofile file\n"+
+		"    \tin module mode, also write the statement coverage profile to this file\n"+
 		"  -exclude pattern\n"+
 		"    \tin module mode, leave the packages matching the pattern out of the report\n"+
 		"  -help\n"+

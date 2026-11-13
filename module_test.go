@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -237,4 +238,52 @@ func Test_gobcoMain__threshold(t *testing.T) {
 	_, stderr := s.RunMain(1, "gobco", "-threshold", "100", "testdata/issue38")
 
 	s.CheckContains(stderr, "gobco: coverage 50.0% is below the threshold 100.0%")
+}
+
+// With a cover profile, the statement coverage is the same as for a plain
+// "go test", and the profile contains none of the files that gobco injected.
+func Test_gobcoMain__module_coverprofile(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+	before := moduleFiles()
+	profile := filepath.Join(t.TempDir(), "cover.out")
+
+	stdout, _ := s.runInModule(0, "-branch", "-coverprofile", profile, "-coverpkg", "./...")
+
+	plain := filepath.Join(t.TempDir(), "plain.out")
+	cmd := exec.Command("go", "test", "-count=1", "-coverpkg=./...", "-coverprofile="+plain, "./...")
+	cmd.Dir = "testdata/module"
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s: %s", err, out)
+	}
+	g := newGobco(&s.out, &s.err)
+	want := g.writeCoverProfile(plain, filepath.Join(t.TempDir(), "plain-filtered.out"))
+	s.Stdout()
+
+	s.CheckContains(stdout, "Branch coverage: 3/4 (75.0%)")
+	s.CheckContains(stdout, fmt.Sprintf("Statement coverage: %s", want))
+
+	data, err := os.ReadFile(profile)
+	ok(err)
+	s.CheckNotContains(string(data), "gobco_")
+	s.CheckNotContains(string(data), "gobcoreg")
+	s.CheckContains(string(data), "mode: set\n")
+	s.CheckContains(string(data), "example.com/gobcomod/a/a.go:")
+	s.CheckEquals(moduleFiles(), before)
+}
+
+func Test_gobcoMain__module_coverprofile_needs_module(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	s.CheckPanics(func() {
+		gobcoMain(&s.out, &s.err, "gobco", "-coverprofile", "c.out", "testdata/issue38")
+	}, exited(1))
+	s.CheckEquals(s.Stderr(), "gobco: -coverprofile needs -module\n")
+
+	s.CheckPanics(func() {
+		s.runIn("testdata/module", "gobco", "-module", "-coverpkg", "./...")
+	}, exited(1))
+	s.CheckEquals(s.Stderr(), "gobco: -coverpkg needs -coverprofile\n")
 }

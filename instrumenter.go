@@ -627,10 +627,46 @@ func (i *instrumenter) instrumentTestMain(astFile *ast.File) {
 				i.hasTestMain = true
 
 				ast.Inspect(decl.Body, wrap)
+				if !done {
+					done = i.wrapRun(decl)
+				}
 				assert(done, "gobco can only handle TestMain with explicit call to os.Exit")
 			}
 		}
 	}
+}
+
+// wrapRun handles a TestMain function that does not call os.Exit.
+// Since go1.15, the test binary then exits with the result of m.Run, so
+// the call to m.Run is replaced with GobcoFinish(m.Run()).
+func (i *instrumenter) wrapRun(decl *ast.FuncDecl) bool {
+	params := decl.Type.Params.List
+	if len(params) != 1 || len(params[0].Names) != 1 {
+		return false
+	}
+	m := params[0].Names[0].Name
+
+	done := false
+	ast.Inspect(decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) != 0 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Run" {
+			return true
+		}
+		if recv, ok := sel.X.(*ast.Ident); !ok || recv.Name != m {
+			return true
+		}
+
+		run := *call
+		gen := codeGenerator{call.Pos()}
+		*call = *gen.callFinish(&run).(*ast.CallExpr)
+		done = true
+		return false
+	})
+	return done
 }
 
 //go:embed templates/gobco_fixed.go

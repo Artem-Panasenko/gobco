@@ -523,6 +523,24 @@ func Test_gobcoMain__TestMain(t *testing.T) {
 	_ = stderr
 }
 
+// A TestMain that does not call os.Exit still writes the results.
+func Test_gobcoMain__TestMain_without_exit(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	stdout, _ := s.RunMain(0, "gobco", "-verbose", "testdata/testmainreturn")
+
+	s.CheckEquals(s.GobcoLines(stdout), []string{
+		"Condition coverage: 1/2 (50.0%)",
+		"testdata/testmainreturn/main.go:4:9: " +
+			"condition \"i > 0\" was once true but never false",
+		"Per-file coverage:",
+		"  testdata/testmainreturn/main.go: 1/2 (50.0%)",
+	})
+	s.CheckContains(stdout, "begin original TestMain")
+	s.CheckContains(stdout, "deferred in TestMain")
+}
+
 func Test_gobcoMain__TestMainTest(t *testing.T) {
 	s := NewSuite(t)
 	defer s.TearDownTest()

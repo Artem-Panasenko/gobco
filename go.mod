@@ -1,3 +1,3 @@
 module github.com/artem-panasenko/gobco
 
-go 1.16
+go 1.27

@@ -162,6 +162,19 @@ func Test_gobco_parseCommandLine__module(t *testing.T) {
 	s.CheckEquals(g.exclude, []string{"a"})
 }
 
+// When gobco stops because of an error, it removes its temporary files.
+func Test_gobco_check(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+
+	g := s.newGobco()
+	s.CheckPanics(func() { g.check(os.ErrInvalid) }, exited(1))
+
+	_, err := os.Stat(g.tmpdir)
+	s.CheckEquals(os.IsNotExist(err), true)
+	s.CheckEquals(s.Stderr(), "invalid argument\n")
+}
+
 func Test_gobco_parseCommandLine__keep(t *testing.T) {
 	s := NewSuite(t)
 	defer s.TearDownTest()

@@ -153,7 +153,9 @@ func (g *gobco) listPackages(modRoot string, patterns []string) []modulePkg {
 // again for each package.
 func (g *gobco) exportImporter() types.Importer {
 	exportFiles := map[string]string{}
-	exports := g.goList("-e", "-export", "-deps", "-test",
+	// Without "-e", a package that does not compile stops the run
+	// with the message from the compiler.
+	exports := g.goList("-export", "-deps", "-test",
 		"-f", "{{if .Export}}{{.ImportPath}}\t{{.Export}}{{end}}", "./...")
 	for _, line := range strings.Split(exports, "\n") {
 		fields := strings.SplitN(line, "\t", 2)
@@ -272,6 +274,8 @@ func (g *gobco) goList(args ...string) string {
 	cmd := exec.Command("go", append([]string{"list"}, args...)...)
 	cmd.Stderr = g.stderr
 	out, err := cmd.Output()
-	g.check(err)
+	if err != nil {
+		g.check(fmt.Errorf("gobco: go list: %s", err))
+	}
 	return strings.TrimSpace(string(out))
 }

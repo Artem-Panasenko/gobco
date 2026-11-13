@@ -152,6 +152,22 @@ func Test_gobcoMain__module_registry_exists(t *testing.T) {
 	s.CheckEquals(s.Stderr(), "gobco: directory gobcoreg already exists\n")
 }
 
+// A package that does not compile stops the run with the compiler's message.
+func Test_gobcoMain__module_build_fails(t *testing.T) {
+	s := NewSuite(t)
+	defer s.TearDownTest()
+	dir := writeModule(t, map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.16\n",
+		"p.go":   "package p\n\nfunc P() int { return undefined }\n",
+	})
+
+	s.CheckPanics(func() { s.runIn(dir, "gobco", "-module") }, exited(1))
+
+	stderr := s.Stderr()
+	s.CheckContains(stderr, "p.go:3:23: undefined: undefined")
+	s.CheckContains(stderr, "gobco: go list: exit status 1")
+}
+
 // When a test fails, the coverage is still reported.
 func Test_gobcoMain__module_test_fails(t *testing.T) {
 	s := NewSuite(t)

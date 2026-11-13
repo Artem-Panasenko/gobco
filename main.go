@@ -68,6 +68,16 @@ func newGobco(stdout io.Writer, stderr io.Writer) *gobco {
 	return &g
 }
 
+// check stops gobco if there is an error,
+// after removing the temporary files.
+func (g *gobco) check(err error) {
+	if err != nil {
+		g.errf("%s", err)
+		g.cleanUp()
+		exit(1)
+	}
+}
+
 func (g *gobco) parseCommandLine(argv []string) {
 	args := g.parseOptions(argv)
 	g.parseArgs(args)

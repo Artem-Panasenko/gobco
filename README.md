@@ -16,6 +16,7 @@ Gobco also doesn't cover `select` statements.
 $ go install github.com/artem-panasenko/gobco@latest
 ```
 
+Gobco needs go1.27 or later.
 Build gobco with the Go toolchain of the environment that runs the tests,
 since gobco calls `go list` and `go test` from there.
 
